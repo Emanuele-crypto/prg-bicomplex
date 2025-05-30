@@ -2692,4 +2692,537 @@ function attachSupplierEvents(supplierElement) {
       if ($(this).val() === 'ALTRO') {
           altroField.removeClass('hidden-field');
       } else {
-          altroField.addClass('hidden-field').val('
+          altroField.addClass('hidden-field').val('');
+      }
+  });
+  
+  // Calcoli automatici
+  supplierElement.find('.quantita-fornitore, .quantita-trasformata, .portata-impianto, .orario-inizio, .resa-prima, .resa-seconda, .resa-torchiato').on('input change', function() {
+      calculateEndTime(supplierElement);
+      calculateGiacenza(supplierElement);
+      calculateYieldQuantities(supplierElement);
+      updateTotals();
+      updateAutoSums();
+      updateDistributionTotal(supplierElement);
+  });
+  
+  // Evento trasferimento
+  supplierElement.find('.execute-transfer').click(function() {
+      executeTransfer(supplierElement);
+  });
+  
+  // Rimozione fornitore
+  supplierElement.find('.rimuovi-fornitore').click(function() {
+      if (confirm('Sei sicuro di voler rimuovere questo fornitore?')) {
+          // Rimuovi tutti i trasferimenti associati a questo fornitore
+          const supplierIndex = supplierElement.data('supplier-index');
+          delete transferData[supplierIndex];
+          
+          // Rimuovi riferimenti a questo fornitore dai trasferimenti di altri
+          Object.keys(transferData).forEach(key => {
+              transferData[key] = transferData[key].filter(transfer => 
+                  transfer.fromSupplier !== supplierIndex
+              );
+          });
+          
+          supplierElement.remove();
+          updateTotals();
+          updateCombinazioneOptions();
+          toggleCombinazioniSection();
+          renumberSuppliers();
+          updateAutoSums();
+          
+          // Aggiorna opzioni di trasferimento per tutti i fornitori rimanenti
+          $('.supplier-row').each(function() {
+              updateTransferOptions($(this));
+          });
+      }
+  });
+}
+
+// Aggiorna colori destinazione in base a certificazione e bio status
+function updateDestinationColors(supplierElement) {
+  const certificazione = supplierElement.find('.certificazione-prodotto').val();
+  const bioStatus = supplierElement.find('.bio-prima').val();
+  const destinazionePrimaLabel = supplierElement.find('.destinazione-prima-label');
+  const destinazionePrimaSelect = supplierElement.find('.destinazione-prima').next('.select2-container');
+  
+  destinazionePrimaLabel.removeClass('bio-red-text bio-black-text');
+  destinazionePrimaSelect.removeClass('bio-red-text bio-black-text');
+  
+  if (['BIO EU', 'BIO DEM', 'BIO NTD', 'BIO DEM/NTD'].includes(certificazione)) {
+      if (bioStatus === 'DECLASSATO') {
+          destinazionePrimaLabel.addClass('bio-black-text');
+          destinazionePrimaSelect.find('.select2-selection').css('color', '#000000').css('font-weight', 'bold');
+      } else {
+          destinazionePrimaLabel.addClass('bio-red-text');
+          destinazionePrimaSelect.find('.select2-selection').css('color', '#dc3545').css('font-weight', 'bold');
+      }
+  }
+}
+
+// Calcolo orario fine lavorazione con gestione giorno successivo
+function calculateEndTime(supplierElement) {
+  const quantitaTrasformata = parseFloat(supplierElement.find('.quantita-trasformata').val()) || 0;
+  const portata = parseFloat(supplierElement.find('.portata-impianto').val()) || 0;
+  const orarioInizio = supplierElement.find('.orario-inizio').val();
+  
+  if (quantitaTrasformata > 0 && portata > 0 && orarioInizio) {
+      const durataTotaleMinuti = Math.round((quantitaTrasformata / portata) * 60);
+      const ore = Math.floor(durataTotaleMinuti / 60);
+      const minuti = durataTotaleMinuti % 60;
+      
+      const dataLavorazione = $('#data-lavorazione').val();
+      if (!dataLavorazione) {
+          supplierElement.find('.orario-fine-display').html('');
+          supplierElement.find('.durata-lavorazione').val('');
+          return;
+      }
+      
+      // Crea data/ora di inizio
+      const [oraInizio, minutiInizio] = orarioInizio.split(':').map(n => parseInt(n));
+      const dataInizio = new Date(dataLavorazione);
+      dataInizio.setHours(oraInizio, minutiInizio, 0, 0);
+      
+      // Calcola data/ora di fine
+      const dataFine = new Date(dataInizio.getTime() + durataTotaleMinuti * 60 * 1000);
+      
+      const oreFine = dataFine.getHours().toString().padStart(2, '0');
+      const minutiFine = dataFine.getMinutes().toString().padStart(2, '0');
+      let orarioFineDisplay = `${oreFine}:${minutiFine}`;
+      
+      // Controlla se la data è cambiata
+      if (dataFine.getDate() !== dataInizio.getDate()) {
+          const giornoSuccessivo = dataFine.getDate();
+          orarioFineDisplay += ` <span class="next-day">(del giorno ${giornoSuccessivo})</span>`;
+      }
+      
+      supplierElement.find('.orario-fine-display').html(orarioFineDisplay);
+      supplierElement.find('.durata-lavorazione').val(`${ore}h ${minuti}m`);
+  } else {
+      supplierElement.find('.orario-fine-display').html('');
+      supplierElement.find('.durata-lavorazione').val('');
+  }
+}
+
+// Calcolo giacenza per fornitore (Entrata - Trasformata)
+function calculateGiacenza(supplierElement) {
+  const quantitaEntrata = parseFloat(supplierElement.find('.quantita-fornitore').val()) || 0;
+  const quantitaTrasformata = parseFloat(supplierElement.find('.quantita-trasformata').val()) || 0;
+  const giacenza = quantitaEntrata - quantitaTrasformata;
+  
+  supplierElement.find('.giacenza-fornitore').val(giacenza >= 0 ? giacenza : 0);
+}
+
+// Calcolo quantità prodotti in base alle rese
+function calculateYieldQuantities(supplierElement) {
+  const quantitaTrasformata = parseFloat(supplierElement.find('.quantita-trasformata').val()) || 0;
+  const resaPrima = parseFloat(supplierElement.find('.resa-prima').val()) || 0;
+  
+  if (quantitaTrasformata > 0) {
+      // Calcola solo la quantità prima se non è un valore da combinazione
+      const quantitaPrimaField = supplierElement.find('.quantita-prima');
+      if (!quantitaPrimaField.hasClass('combination-result')) {
+          const quantitaPrima = (quantitaTrasformata * resaPrima / 100).toFixed(1);
+          quantitaPrimaField.val(quantitaPrima);
+      }
+  } else {
+      // Reset solo se non è un valore da combinazione
+      const quantitaPrimaField = supplierElement.find('.quantita-prima');
+      if (!quantitaPrimaField.hasClass('combination-result')) {
+          quantitaPrimaField.val('');
+      }
+  }
+  
+  // Le quantità di seconda e torchiato vengono gestite da updateAutoSums()
+}
+
+// Aggiornamento totali
+function updateTotals() {
+  let totaleEntrata = 0;
+  let totaleTrasformata = 0;
+  let totaleGiacenza = 0;
+  
+  $('.supplier-row').each(function() {
+      const entrata = parseFloat($(this).find('.quantita-fornitore').val()) || 0;
+      const trasformata = parseFloat($(this).find('.quantita-trasformata').val()) || 0;
+      const giacenza = parseFloat($(this).find('.giacenza-fornitore').val()) || 0;
+      
+      totaleEntrata += entrata;
+      totaleTrasformata += trasformata;
+      totaleGiacenza += giacenza;
+  });
+  
+  $('#entrata-giornaliera').val(totaleEntrata);
+  $('#trasformata-totale').val(totaleTrasformata);
+  $('#giacenza-totale').val(totaleGiacenza);
+}
+
+// Rinumerazione fornitori dopo rimozione
+function renumberSuppliers() {
+  let newCount = 0;
+  $('.supplier-row').each(function() {
+      newCount++;
+      $(this).attr('data-supplier-index', newCount);
+      $(this).find('.supplier-number').text(newCount);
+  });
+  supplierCount = newCount;
+  updateCombinazioneOptions();
+}
+
+// Gestione modal Rese
+function openYieldsModal() {
+  const selectedAgrume = $('#tipo-agrume-giornaliero').val();
+  
+  if (!selectedAgrume) {
+      alert('Seleziona prima il tipo di agrume nel programma principale');
+      return;
+  }
+  
+  // Aggiorna display agrume selezionato
+  $('#agrume-selected').text(selectedAgrume);
+  
+  // Carica dati rese esistenti per l'agrume selezionato
+  loadYieldsData(selectedAgrume);
+  
+  $('#yields-modal').fadeIn();
+}
+
+function closeYieldsModal() {
+  $('#yields-modal').fadeOut();
+}
+
+function loadYieldsData(agrume) {
+  // Se esistono dati salvati per questo agrume, caricali
+  if (yieldsData[agrume]) {
+      const data = yieldsData[agrume];
+      
+      // Carica rese succo 1ª
+      for (let month = 1; month <= 12; month++) {
+          const value = data.prima && data.prima[month] ? data.prima[month] : '';
+          $(`.yield-input[data-type="prima"][data-month="${month}"]`).val(value);
+      }
+      
+      // Carica rese succo 2ª
+      for (let month = 1; month <= 12; month++) {
+          const value = data.seconda && data.seconda[month] ? data.seconda[month] : '';
+          $(`.yield-input[data-type="seconda"][data-month="${month}"]`).val(value);
+      }
+      
+      // Carica rese torchiato
+      for (let month = 1; month <= 12; month++) {
+          const value = data.torchiato && data.torchiato[month] ? data.torchiato[month] : '';
+          $(`.yield-input[data-type="torchiato"][data-month="${month}"]`).val(value);
+      }
+  } else {
+      // Pulisci tutti i campi se non ci sono dati salvati
+      $('.yield-input').val('');
+  }
+}
+
+function saveYieldsData() {
+  const selectedAgrume = $('#tipo-agrume-giornaliero').val();
+  
+  if (!selectedAgrume) {
+      alert('Nessun agrume selezionato');
+      return;
+  }
+  
+  // Inizializza struttura dati per l'agrume
+  if (!yieldsData[selectedAgrume]) {
+      yieldsData[selectedAgrume] = {
+          prima: {},
+          seconda: {},
+          torchiato: {}
+      };
+  }
+  
+  // Salva rese succo 1ª
+  for (let month = 1; month <= 12; month++) {
+      const value = $(`.yield-input[data-type="prima"][data-month="${month}"]`).val();
+      if (value) {
+          yieldsData[selectedAgrume].prima[month] = parseFloat(value);
+      }
+  }
+  
+  // Salva rese succo 2ª
+  for (let month = 1; month <= 12; month++) {
+      const value = $(`.yield-input[data-type="seconda"][data-month="${month}"]`).val();
+      if (value) {
+          yieldsData[selectedAgrume].seconda[month] = parseFloat(value);
+      }
+  }
+  
+  // Salva rese torchiato
+  for (let month = 1; month <= 12; month++) {
+      const value = $(`.yield-input[data-type="torchiato"][data-month="${month}"]`).val();
+      if (value) {
+          yieldsData[selectedAgrume].torchiato[month] = parseFloat(value);
+      }
+  }
+  
+  alert(`Rese salvate con successo per ${selectedAgrume}!`);
+  console.log('Dati rese salvati:', yieldsData);
+}
+
+function resetYieldsData() {
+  if (confirm('Sei sicuro di voler cancellare tutti i dati di resa per questo agrume?')) {
+      $('.yield-input').val('');
+      
+      const selectedAgrume = $('#tipo-agrume-giornaliero').val();
+      if (selectedAgrume && yieldsData[selectedAgrume]) {
+          delete yieldsData[selectedAgrume];
+      }
+      
+      alert('Dati di resa cancellati');
+  }
+}
+
+// Raccolta dati programma - MODIFICATA per supportare distribuzione e trasferimenti
+function collectProgramData() {
+  const data = {
+      tipoAgrume: $('#tipo-agrume-giornaliero').val(),
+      dataLavorazione: $('#data-lavorazione').val(),
+      entrataGiornaliera: parseFloat($('#entrata-giornaliera').val()) || 0,
+      trasformataTotale: parseFloat($('#trasformata-totale').val()) || 0,
+      giacenzaTotale: parseFloat($('#giacenza-totale').val()) || 0,
+      ultimaRevisione: $('#last-revision').text(),
+      
+      // Dati combinazioni A
+      lastCombinationSuppliersA: lastCombinationSuppliersA,
+      combinationDetailsA: combinationDetailsA,
+      combinationSupplierIndexesA: combinationSupplierIndexesA,
+      
+      // Dati combinazioni B
+      lastCombinationSuppliersB: lastCombinationSuppliersB,
+      combinationDetailsB: combinationDetailsB,
+      combinationSupplierIndexesB: combinationSupplierIndexesB,
+      
+      sumDetailsSeconda: sumDetailsSeconda,
+      sumDetailsTorchiato: sumDetailsTorchiato,
+      transferData: transferData,
+      fornitori: []
+  };
+  
+  $('.supplier-row').each(function() {
+      const destinazioniPrima = $(this).find('.destinazione-prima').val() || [];
+      const linea = $(this).find('.linea-trasformazione').val();
+      const supplierIndex = parseInt($(this).data('supplier-index'));
+      
+      // Raccolta dati distribuzione
+      const distributionData = {};
+      $(this).find('.distribution-qty').each(function() {
+          const dest = $(this).data('dest');
+          const qty = parseFloat($(this).val()) || 0;
+          if (qty > 0) {
+              distributionData[dest] = qty;
+          }
+      });
+      
+      // Raccolta dati trasferimenti ricevuti
+      const receivedTransfers = transferData[supplierIndex] || [];
+      
+      const fornitore = {
+          supplierIndex: supplierIndex,
+          nome: $(this).find('.nome-fornitore').val(),
+          altroNome: $(this).find('.altro-fornitore').val(),
+          quantitaEntrata: parseFloat($(this).find('.quantita-fornitore').val()) || 0,
+          quantitaTrasformata: parseFloat($(this).find('.quantita-trasformata').val()) || 0,
+          giacenza: parseFloat($(this).find('.giacenza-fornitore').val()) || 0,
+          certificazione: $(this).find('.certificazione-prodotto').val(),
+          altraCertificazione: $(this).find('.altra-certificazione').val(),
+          varieta: $(this).find('.varieta-prodotto').val(),
+          altraVarieta: $(this).find('.altra-varieta').val(),
+          lineaTrasformazione: linea,
+          portataImpianto: parseFloat($(this).find('.portata-impianto').val()) || 0,
+          orarioInizio: $(this).find('.orario-inizio').val(),
+          orarioFineDisplay: $(this).find('.orario-fine-display').html(),
+          durataLavorazione: $(this).find('.durata-lavorazione').val(),
+          rese: {
+              prima: parseFloat($(this).find('.resa-prima').val()) || 0,
+              seconda: linea === 'BOE/1100' ? (parseFloat($(this).find('.resa-seconda').val()) || 0) : 0,
+              torchiato: parseFloat($(this).find('.resa-torchiato').val()) || 0
+          },
+          quantitaProdotti: {
+              prima: parseFloat($(this).find('.quantita-prima').val()) || 0,
+              seconda: linea === 'BOE/1100' ? (parseFloat($(this).find('.quantita-seconda').val()) || 0) : 0,
+              torchiato: parseFloat($(this).find('.quantita-torchiato').val()) || 0
+          },
+          hasCombination: $(this).find('.quantita-prima').hasClass('combination-result'),
+          combinationType: $(this).find('.quantita-prima').attr('data-combination-type') || '',
+          hasReceivedTransfers: $(this).find('.quantita-prima').hasClass('received-transfer'),
+          receivedTransfers: receivedTransfers,
+          isAutoSum: {
+              seconda: $(this).find('.quantita-seconda').hasClass('auto-sum-field'),
+              torchiato: $(this).find('.quantita-torchiato').hasClass('auto-sum-field')
+          },
+          distributionData: distributionData,
+          caratteristicheProdotti: {
+              prima: {
+                  tenorePolpa: $(this).find('.tenore-polpa-prima').val(),
+                  altroTenore: $(this).find('.altro-tenore-prima').val(),
+                  brix: $(this).find('.brix-prima').val(),
+                  altroBrix: $(this).find('.altro-brix-prima').val(),
+                  bio: $(this).find('.bio-prima').val(),
+                  pastorizzato: $(this).find('.pastorizzato-prima').val(),
+                  conservato: $(this).find('.conservato-prima').val(),
+                  note: $(this).find('.note-prima').val()
+              },
+              seconda: linea === 'BOE/1100' ? {
+                  tenorePolpa: $(this).find('.tenore-polpa-seconda').val(),
+                  altroTenore: $(this).find('.altro-tenore-seconda').val(),
+                  brix: $(this).find('.brix-seconda').val(),
+                  altroBrix: $(this).find('.altro-brix-seconda').val(),
+                  pastorizzato: $(this).find('.pastorizzato-seconda').val(),
+                  conservato: $(this).find('.conservato-seconda').val(),
+                  note: $(this).find('.note-seconda').val()
+              } : null,
+              torchiato: {
+                  tenorePolpa: $(this).find('.tenore-polpa-torchiato').val(),
+                  altroTenore: $(this).find('.altro-tenore-torchiato').val(),
+                  brix: $(this).find('.brix-torchiato').val(),
+                  altroBrix: $(this).find('.altro-brix-torchiato').val(),
+                  pastorizzato: $(this).find('.pastorizzato-torchiato').val(),
+                  conservato: $(this).find('.conservato-torchiato').val(),
+                  note: $(this).find('.note-torchiato').val()
+              }
+          },
+          destinazioni: {
+              prima: destinazioniPrima.join(', '),
+              primaAltro: $(this).find('.destinazione-prima').parent().find('.altra-destinazione').val() || '',
+              seconda: linea === 'BOE/1100' ? $(this).find('.destinazione-seconda').val() : '',
+              secondaAltro: linea === 'BOE/1100' ? ($(this).find('.destinazione-seconda').parent().find('.altra-destinazione').val() || '') : '',
+              torchiato: $(this).find('.destinazione-torchiato').val(),
+              torchiatoAltro: $(this).find('.destinazione-torchiato').parent().find('.altra-destinazione').val() || ''
+          }
+      };
+      
+      data.fornitori.push(fornitore);
+  });
+  
+  return data;
+}
+
+// Eventi principali
+$('#tipo-agrume-giornaliero').change(function() {
+  const agrume = $(this).val();
+  if (agrume) {
+      const yields = calculateAutoYields(agrume);
+      
+      $('.supplier-row').each(function() {
+          $(this).find('.resa-prima').val(yields.prima);
+          $(this).find('.resa-seconda').val(yields.seconda);
+          $(this).find('.resa-torchiato').val(yields.torchiato);
+          
+          // Aggiorna opzioni varietà per tutti i fornitori esistenti
+          updateVarietyOptions($(this), agrume);
+          
+          calculateYieldQuantities($(this));
+          updateDistributionTotal($(this));
+      });
+      
+      updateTotals();
+      updateAutoSums();
+  }
+});
+
+// Pulsanti combinazioni A e B
+$('#applica-combinazione-a').click(function() {
+  applyCombination('a');
+});
+
+$('#reset-combinazione-a').click(function() {
+  resetCombination('a');
+});
+
+$('#applica-combinazione-b').click(function() {
+  applyCombination('b');
+});
+
+$('#reset-combinazione-b').click(function() {
+  resetCombination('b');
+});
+
+// Pulsante aggiungi fornitore
+$('#aggiungi-fornitore').click(function() {
+  if (!$('#tipo-agrume-giornaliero').val()) {
+      alert('Seleziona prima il tipo di agrume');
+      return;
+  }
+  addSupplier();
+});
+
+// Pulsante Rese
+$('#rese-button').click(function() {
+  openYieldsModal();
+});
+
+// Chiudi modal rese
+$('.close-yields').click(function() {
+  closeYieldsModal();
+});
+
+// Salva rese
+$('#salva-rese').click(function() {
+  saveYieldsData();
+});
+
+// Reset rese
+$('#reset-rese').click(function() {
+  resetYieldsData();
+});
+
+// Chiudi modal cliccando fuori
+$(window).click(function(event) {
+  if (event.target.id === 'yields-modal') {
+      closeYieldsModal();
+  }
+});
+
+// Validazione programma
+function validateProgram() {
+  if (!$('#tipo-agrume-giornaliero').val()) {
+      alert('Seleziona il tipo di agrume');
+      return false;
+  }
+  
+  if (!$('#data-lavorazione').val()) {
+      alert('Inserisci la data di lavorazione');
+      return false;
+  }
+  
+  if ($('.supplier-row').length === 0) {
+      alert('Aggiungi almeno un fornitore');
+      return false;
+  }
+  
+  let isValid = true;
+  $('.supplier-row').each(function() {
+      const fornitore = $(this).find('.nome-fornitore').val();
+      
+      if (!fornitore) {
+          isValid = false;
+          $(this)[0].scrollIntoView({ behavior: 'smooth', block: 'center' });
+          alert('Inserisci almeno il nome del fornitore');
+          return false;
+      }
+  });
+  
+  return isValid;
+}
+
+// Reset programma
+$('#reset-programma').click(function() {
+  if (confirm('Attenzione: questa operazione cancellerà tutti i dati inseriti. Continuare?')) {
+      location.reload();
+  }
+});
+
+// Inizializzazione
+initCurrentDate();
+
+console.log('Sistema Programma Giornaliero Trasformazione inizializzato con successo - Con gestione distribuzione destinazioni e trasferimenti tra fornitori con somma automatica e formattazione corretta');
+});
+</script>
+</body>
+</html>
